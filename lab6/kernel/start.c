@@ -16,12 +16,54 @@
 #include "string.h"
 #include <stddef.h>
 #include "log.h"
+#include "memlayout.h"
+#include "vm.h"
+#include "pagetable.h"
+#include "pmm.h"
+#include <string.h>
+#include "../user/user.h"
+extern int debug_syscalls;
 extern void uartinit(void);
 extern void uart_puts(char *s);
-extern char etext[];
+extern pagetable_t kernel_pagetable;
+extern char initcode_start[];
+extern char initcode_end[];
+extern void enter_user_mode(pagetable_t pt, uint64 uentry, uint64 usp);
+extern void enter_user_after_fork(pagetable_t pt, uint64 uentry, uint64 usp);
+extern pagetable_t kernel_pagetable;
+
+static uint64 g_user_entry = 0;
+static uint64 g_user_sp = 0;
+static pagetable_t first_user_pt = 0;
+
+static void userinit_thread(void) {
+  struct proc *p = get_current_process();
+  // set sscratch to this kthread's kernel stack top for trap switching
+  if (p) {
+    w_sscratch((uint64)p->kstack + p->kstack_size);
+  }
+  printf("launching userinit at %p, usp=%p\n", (void*)g_user_entry, (void*)g_user_sp);
+  printf("satp=%p sstatus=%p\n", r_satp(), r_sstatus());
+  enter_user_mode(p->pagetable ? p->pagetable : kernel_pagetable, g_user_entry, g_user_sp);
+  for(;;) {}
+}
+void user_fork_entry(void) {
+  struct proc *p = get_current_process();
+  if (p) {
+    w_sscratch((uint64)p->kstack + p->kstack_size);
+    enter_user_after_fork(p->pagetable ? p->pagetable : kernel_pagetable, p->u_sepc, p->u_sp);
+  }
+  for(;;) {}
+}
 static volatile uint64 ticks_observed = 0;
 static volatile int *test_flag_ptr = 0;
-void schedule_on_tick(void) { ticks_observed++; if (test_flag_ptr) (*test_flag_ptr)++; }
+// 时钟中断回调：保留测试计数，同时进行进程时间统计/aging
+void schedule_on_tick(void) {
+  ticks_observed++;
+  if (test_flag_ptr) (*test_flag_ptr)++;
+  extern void proc_on_tick(void);
+  proc_on_tick();
+}
 // Kernel entry point from entry.S
 void test_printf_basic() {
     printf("Testing integer: %d\n", 42);
@@ -77,7 +119,7 @@ void test_physical_memory(void) {
      // page3可能等于page1（取决于分配策略）
      free_page(page2);
      free_page(page3);
-     printf("physical successed !",0);
+    printf("physical successed !");
    }
 void test_pagetable(void) {
      pagetable_t pt = create_pagetable();
@@ -95,16 +137,16 @@ void test_pagetable(void) {
      assert(!(*pte & PTE_X));
      free_page((void*)pa); // 释放物理页
      destroy_pagetable(pt);
-     printf("pagetable successed !",0);
+    printf("pagetable successed !");
    }
 void test_virtual_memory(void) {
-     printf("Before enabling paging...\n",0);
+     printf("Before enabling paging...\n");
      // 启用分页
      kvminit();
      kvminithart();
      trap_init();
      timer_init(1000000ULL);
-     printf("After enabling paging...\n",0);
+     printf("After enabling paging...\n");
      // 已移除不安全的内核代码执行测试
 
   // 测试内核数据仍然可访问
@@ -117,9 +159,9 @@ void test_virtual_memory(void) {
 
   // 测试设备访问仍然正常
   uart_puts("UART test after paging\n");
-  printf("UART device access test passed\n",0);
+  printf("UART device access test passed\n");
 
-  printf("Finished test_virtual_memory\n",0);
+  printf("Finished test_virtual_memory\n");
 }
 void test_timer_interrupt(void) {
   printf("Testing timer interrupt...\n");
@@ -196,7 +238,16 @@ static void delay_cycles(uint64 cycles) {
     yield();
   }
 }
-
+// 消耗CPU时间但不主动让出，便于统计 RUNNING ticks
+static void burn_cycles(uint64 cycles) {
+  uint64 start = get_time();
+  while (get_time() - start < cycles) {
+    asm volatile("");
+    // 软抢占演示：在忙等期间也检查是否用满片需要让出
+    extern void preempt_check(void);
+    preempt_check();
+  }
+}
 static void simple_task(void) {
   struct proc *p = get_current_process();
   printf("simple_task pid=%d\n", p ? p->pid : -1);
@@ -525,20 +576,152 @@ void test_filesystem_performance(void) {
    printf("Small blocks (1000x4B): %p cycles\n", (void*)small_files_time);
   printf("Large blocks (1024x4KB ~4MB): %p cycles\n", (void*)large_file_time);
 }
+// ==== 调度场景测试任务 ====
+void task_A(void) {
+  struct proc *p = get_current_process();
+  for (int i = 0; i < 50; i++) {
+    burn_cycles(20000ULL);
+    yield();
+  }
+  printf("task_A finish pid=%d ticks=%d\n", p ? p->pid : -1, p ? p->ticks : -1);
+}
+
+void task_B(void) {
+  struct proc *p = get_current_process();
+  for (int i = 0; i < 50; i++) {
+    burn_cycles(20000ULL);
+    yield();
+  }
+  printf("task_B finish pid=%d ticks=%d\n", p ? p->pid : -1, p ? p->ticks : -1);
+}
+
+void task_C(void) {
+  struct proc *p = get_current_process();
+  for (int i = 0; i < 50; i++) {
+    burn_cycles(20000ULL);
+    yield();
+  }
+  printf("task_C finish pid=%d ticks=%d\n", p ? p->pid : -1, p ? p->ticks : -1);
+}
+
+void test_sched_T1(void) {
+  printf("[T1] 两个任务，优先级差距大\n");
+  int pidA = create_process_named(task_A, "task_A");
+  int pidB = create_process_named(task_B, "task_B");
+  printf("created: A=%d B=%d\n", pidA, pidB);
+  setpriority(pidA, 8);
+  setpriority(pidB, 2);
+  for (int done = 0; done < 2;) {
+    int w = wait_process(0);
+    if (w == -1) { yield(); }
+    else { done++; }
+  }
+  extern void proc_dump_detailed(void);
+  proc_dump_detailed();
+}
+
+void test_sched_T2(void) {
+  printf("[T2] 相同优先级，行为等价RR（观察交替进展）\n");
+  int pidA = create_process_named(task_A, "task_A");
+  int pidB = create_process_named(task_B, "task_B");
+  setpriority(pidA, 5);
+  setpriority(pidB, 5);
+  for (int done = 0; done < 2;) {
+    int w = wait_process(0);
+    if (w == -1) { yield(); }
+    else { done++; }
+  }
+  extern void proc_dump_detailed(void);
+  proc_dump_detailed();
+}
+
+void test_sched_T3(void) {
+  printf("[T3] 高低混合 + aging，最终均完成\n");
+  int p1 = create_process_named(task_A, "task_A");
+  int p2 = create_process_named(task_B, "task_B");
+  int p3 = create_process_named(task_C, "task_C");
+  setpriority(p1, 8);
+  setpriority(p2, 2);
+  setpriority(p3, 6);
+  for (int done = 0; done < 3;) {
+    int w = wait_process(0);
+    if (w == -1) { yield(); }
+    else { done++; }
+  }
+  extern void proc_dump_detailed(void);
+  proc_dump_detailed();
+}
+// ---- 系统调用测试 ----
+void test_basic_syscalls(void) {
+  printf("Testing basic system calls...\n");
+  int pid = usys_getpid();
+  printf("Current PID: %d\n", pid);
+  int child_pid = usys_fork();
+  if (child_pid == 0) {
+    printf("Child process: PID=%d\n", usys_getpid());
+    usys_exit();
+  } else if (child_pid > 0) {
+    int status = 0;
+    // 当前 wait 简化为等待任意子进程，不返回状态
+    (void)usys_wait();
+    printf("Child exited with status: %d\n", status);
+  } else {
+    printf("Fork failed!\n");
+  }
+}
+
+void test_parameter_passing(void) {
+  printf("Testing parameter passing...\n");
+  char buffer[] = "Hello, World!";
+  int fd = 1; // 使用控制台 fd=1
+  int bytes_written = usys_write(fd, buffer, strlen(buffer));
+  printf("Wrote %d bytes\n", bytes_written);
+  // 边界情况
+  usys_write(-1, buffer, 10);      // 无效文件描述符
+  usys_write(fd, (void*)0, 10);    // 空指针
+  usys_write(fd, buffer, -1);      // 负数长度
+}
+
+void test_security(void) {
+  printf("Testing syscall security...\n");
+  // 无效指针：指向 TRAPFRAME 或更高
+  char *invalid_ptr = (char*)TRAPFRAME;
+  int result = usys_write(1, invalid_ptr, 10);
+  printf("Invalid pointer write result: %d\n", result);
+  // 缓冲区边界：尝试读取超过缓冲区大小（当前 read/console 输入可能不支持）
+  char small_buf[4];
+  result = usys_read(0, small_buf, 1000);
+  printf("Read into small buffer result: %d\n", result);
+}
+
+void test_syscall_performance(void) {
+  printf("Testing syscall performance...\n");
+  uint64 start_time = get_time();
+  for (int i = 0; i < 10000; i++) {
+    (void)usys_getpid();
+  }
+  uint64 end_time = get_time();
+  printf("10000 getpid() calls took %p cycles\n", (void*)(end_time - start_time));
+}
 
 // 作为初始内核线程，运行测试序列
-static void kernel_test_main(void) {
+void kernel_test_main(void) {
   //test_process_creation();
   //test_scheduler();
   //test_synchronization();
+
   // 文件系统调试与测试
-  debug_filesystem_state();
-  debug_disk_io();
-  test_filesystem_integrity();
-  test_concurrent_access();
-  test_crash_recovery();
-  test_filesystem_performance();
-  printf("All integrated tests completed.\n");
+  //debug_filesystem_state();
+  //debug_disk_io();
+  //test_filesystem_integrity();
+  //test_concurrent_access();
+  //test_crash_recovery();
+  //test_filesystem_performance();
+  //timer_init(80000ULL);
+  //test_sched_T1();
+  //test_sched_T2();
+  //test_sched_T3();
+  //printf("All integrated tests completed.\n");
 }
 
 void
@@ -548,6 +731,9 @@ start(void)
   if (r_tp() != 0) {
     for(;;);
   }
+
+  // 允许 S 模式访问用户页（PTE_U），以便复制用户缓冲区
+  w_sstatus(r_sstatus() | (1L << 18)); // SUM bit
   test_printf_basic();
   test_printf_edge_cases();
   test_console_features();
@@ -557,12 +743,91 @@ start(void)
   test_virtual_memory();
   test_timer_interrupt();
   test_interrupt_overhead();
+
   //test_exception_handling();
- 
+  proc_init();
   bcache_init();
-  // 将综合测试以内核线程运行，并进入调度器
-  int root = create_process_named(kernel_test_main, "kernel_test_main");
-  assert(root > 0);
+  first_user_pt = 0;
+  printf("first_user_pt(init)=%p\n", (void*)first_user_pt);
+  // 将综合测试以内核线程运行
+  //int root = create_process_named(kernel_test_main, "kernel_test_main");
+  //assert(root > 0);
+
+  // 使用 userinit 方案：将用户程序二进制映射到内核页表并进入 U 模式
+  // 用户代码 VA 基址与链接地址保持一致
+  const uint64 U_BASE = 0x400000ULL;
+  uint64 usize = (uint64)(initcode_end - initcode_start);
+  printf("initcode: start=%p end=%p size=%p\n", initcode_start, initcode_end, (void*)usize);
+  assert(initcode_start != 0);
+  assert(usize > 0);
+  uint64 ucur = 0;
+  while (ucur < usize) {
+    void *pa = alloc_page();
+    assert(pa != 0);
+    uint64 chunk = (usize - ucur) > PGSIZE ? PGSIZE : (usize - ucur);
+    memset(pa, 0, PGSIZE);
+    printf("user_copy: ucur=%p chunk=%p dst_pa=%p src_va=%p\n", (void*)ucur, (void*)chunk, pa, initcode_start + ucur);
+    memcpy(pa, initcode_start + ucur, chunk);
+    // 初始用户页表：为首个用户进程创建独立页表
+    // 若尚未创建，创建并初始化内核映射
+    printf("first_user_pt(before)=%p\n", (void*)first_user_pt);
+    if (!first_user_pt) {
+      first_user_pt = create_pagetable();
+      assert(first_user_pt != 0);
+      assert(init_user_pagetable(first_user_pt) == 0);
+      printf("first_user_pt(created)=%p\n", (void*)first_user_pt);
+    } else {
+      uint64 ptv = (uint64)first_user_pt;
+      if ((ptv % PGSIZE) != 0 || ptv < KERNBASE || ptv >= PHYSTOP) {
+        printf("first_user_pt(invalid)=%p recreate\n", (void*)first_user_pt);
+        first_user_pt = create_pagetable();
+        assert(first_user_pt != 0);
+        assert(init_user_pagetable(first_user_pt) == 0);
+        printf("first_user_pt(recreated)=%p\n", (void*)first_user_pt);
+      }
+    }
+    int rc = map_page(first_user_pt, U_BASE + ucur, (uint64)pa, PTE_U | PTE_R | PTE_X);
+    printf("user_map: va=%p <- pa=%p rc=%d\n", (void*)(U_BASE + ucur), pa, rc);
+    assert(rc == 0);
+    ucur += chunk;
+    // 下一页对齐
+    ucur = PGROUNDUP(ucur);
+  }
+
+  // 为用户栈分配一页，改为放置在较低的用户地址，避免高位地址潜在问题
+  const uint64 USTACK_BASE = U_BASE + 0x200000ULL; // +2MB 处
+  void *ustack_pa = alloc_page();
+  assert(ustack_pa != 0);
+  memset(ustack_pa, 0, PGSIZE);
+  int rc_stack = map_page(first_user_pt, USTACK_BASE, (uint64)ustack_pa, PTE_U | PTE_R | PTE_W);
+  assert(rc_stack == 0);
+  // 映射完成后，刷新 TLB 以确保新 PTE 生效
+  sfence_vma();
+  const uint64 USTACK_TOP = USTACK_BASE + PGSIZE;
+  // 初始化用户栈指针略微下移，避免函数序言第一次写越过页边界
+  const uint64 USTACK_INIT_SP = USTACK_TOP - 16;
+  g_user_entry = U_BASE;
+  g_user_sp = USTACK_INIT_SP;
+
+  // 调试：打印关键用户地址与页表项
+  printf("U layout: TRAMPOLINE=%p TRAPFRAME=%p USTACK_BASE=%p USTACK_TOP=%p (low stack)\n",
+         (void*)TRAMPOLINE, (void*)TRAPFRAME, (void*)USTACK_BASE, (void*)USTACK_TOP);
+  extern pte_t* walk_lookup(pagetable_t pt, uint64 va);
+  pte_t *pte_stack = walk_lookup(kernel_pagetable, USTACK_BASE);
+  pte_t *pte_text0 = walk_lookup(kernel_pagetable, U_BASE);
+  printf("pte(stack)=%p val=0x%x, pte(text0)=%p val=0x%x\n",
+         pte_stack, pte_stack ? *pte_stack : 0, pte_text0, pte_text0 ? *pte_text0 : 0);
+
+
+  // 创建一个内核线程，负责切换到 U 模式执行用户程序
+  int uproc = create_process_named(userinit_thread, "userinit");
+  assert(uproc > 0);
+  struct proc *up = find_proc_by_pid(uproc);
+  assert(up != 0);
+  acquire(&up->lock);
+  up->pagetable = first_user_pt;
+  release(&up->lock);
+
   scheduler();
    for(;;);
 }

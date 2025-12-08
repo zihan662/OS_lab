@@ -11,6 +11,13 @@
 // PID 映射桶大小（用于加速 pid→proc 查找）
 #define PIDMAP_SIZE 128
 
+// 优先级相关配置
+#define PRIORITY_MIN 0
+#define PRIORITY_MAX 10
+#define PRIORITY_DEFAULT 5
+// aging：等待时长每达到该阈值，提升 1 级优先级（至多到 MAX）
+#define AGING_INTERVAL 5
+
 // 进程状态
 enum procstate {
   UNUSED = 0,
@@ -68,6 +75,16 @@ struct proc {
 
   // 调试名
   char name[16];
+
+  // ---- 调度属性：优先级与时间统计 ----
+  int priority;               // 进程优先级 (0~10)，默认 5，值越大越高
+  int ticks;                  // 已用 CPU 时间（按时钟中断累计）
+  int wait_time;              // 等待时长（RUNNABLE 态累计，用于 aging）
+  int slice_ticks;            // MLFQ：当前时间片内已用 tick 数
+  int need_resched;           // 时间片用尽请求抢占（软抢占标志）
+  // 用户态恢复所需寄存器（最小集）：用于 fork 子进程恢复
+  uint64 u_sepc;              // 用户返回地址（sepc）
+  uint64 u_sp;                // 用户栈指针
 };
 
 // 核心接口
@@ -100,5 +117,13 @@ void scheduler(void);
 
 // 调试输出：打印进程表
 void proc_dump_table(void);
+void proc_dump_detailed(void);
+
+// 每个时钟中断回调：进行调度统计与 aging
+void proc_on_tick(void);
+
+// 系统调用接口：调整/查询优先级
+int setpriority(int pid, int value);
+int getpriority(int pid);
 
 #endif // PROC_H

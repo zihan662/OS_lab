@@ -1,5 +1,5 @@
 #ifndef __ASSEMBLER__
-
+#include "types.h"
 // which hart (core) is this?
 static inline uint64
 r_mhartid()
@@ -339,12 +339,26 @@ r_ra()
 }
 
 // flush the TLB.
-static inline void
+static inline void 
 sfence_vma()
 {
   // the zero, zero means flush all TLB entries.
   asm volatile("sfence.vma zero, zero");
 }
 
-#endif // __ASSEMBLER__
+// Supervisor Scratch Register: used to hold kernel stack pointer for traps
+static inline uint64
+r_sscratch()
+{
+  uint64 x;
+  asm volatile("csrr %0, sscratch" : "=r" (x) );
+  return x;
+}
 
+static inline void 
+w_sscratch(uint64 x)
+{
+  asm volatile("csrw sscratch, %0" : : "r" (x));
+}
+
+#endif // __ASSEMBLER__

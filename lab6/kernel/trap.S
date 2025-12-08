@@ -3,6 +3,15 @@
 .global trap_vector
 .extern trap_handler
 trap_vector:
+    # Only swap stacks if trap came from user mode (SPP==0)
+    csrr t0, sstatus
+    li   t1, 0x100            # SSTATUS_SPP bit
+    and  t2, t0, t1
+    beqz t2, 1f               # if SPP==0 (user), branch to swap
+    j    2f
+1:
+    csrrw sp, sscratch, sp    # swap: sp<-sscratch, sscratch<-user sp
+2:
     addi sp, sp, -256
     sd ra, 0(sp)
     sd gp, 16(sp)
@@ -38,6 +47,10 @@ trap_vector:
     csrr a0, scause
     csrr a1, sepc
     csrr a2, stval
+    # pass pointer to saved context as a3
+    mv   a3, sp
+    mv   a4, a7
+    ld   a5, 72(sp)
     call trap_handler
 
     ld ra, 0(sp)
@@ -71,4 +84,13 @@ trap_vector:
     ld t5, 232(sp)
     ld t6, 240(sp)
     addi sp, sp, 256
+    # Before returning, swap back only if returning to user (SPP==0)
+    csrr t0, sstatus
+    li   t1, 0x100
+    and  t2, t0, t1
+    beqz t2, 3f
+    j    4f
+3:
+    csrrw sp, sscratch, sp
+4:
     sret

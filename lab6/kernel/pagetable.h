@@ -19,11 +19,20 @@ typedef pte_t* pagetable_t;
 #define PTE_W (1LL << 2)
 #define PTE_X (1LL << 3)
 #define PTE_U (1LL << 4)
+#define PTE_A (1LL << 6)
+#define PTE_D (1LL << 7)
 
 pagetable_t create_pagetable(void);
 int map_page(pagetable_t pt, uint64 va, uint64 pa, int perm);
 int map_region(pagetable_t pt, uint64 va, uint64 pa, uint64 size, int perm); // 新增
 void destroy_pagetable(pagetable_t pt);
+
+// 初始化用户页表的内核映射（KERNBASE 及设备映射），供每个进程独立页表使用
+int init_user_pagetable(pagetable_t pt);
+
+// 复制父进程的用户地址空间（U 区域，低于 TRAPFRAME），为 fork 创建子进程
+int copy_user_space(pagetable_t dst, pagetable_t src);
+int free_user_space(pagetable_t pt);
 
 // 辅助函数
 pte_t* walk_create(pagetable_t pt, uint64 va);

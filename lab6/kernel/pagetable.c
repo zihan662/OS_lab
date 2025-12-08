@@ -10,7 +10,7 @@ pagetable_t create_pagetable(void) {
     panic("create_pagetable: no memory");
   }
   memset(pt, 0, PGSIZE);
-  printf("create_pagetable: allocated %p\n", pt);
+  
   return pt;
 }
 
@@ -69,7 +69,9 @@ int map_page(pagetable_t pt, uint64 va, uint64 pa, int perm) {
     panic("map_page: remap");
   }
 
-  *pte = PA_PTE(pa) | perm | PTE_V;
+    // Set Accessed/Dirty bits to avoid A/D page faults on first touch
+  int extra = PTE_A | PTE_D;
+  *pte = PA_PTE(pa) | perm | extra | PTE_V;
   //printf("map_page: mapped va=%p to pa=%p, perm=0x%x\n", va, pa, perm);
   return 0;
 }

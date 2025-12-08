@@ -2,6 +2,7 @@
 #include "types.h"
 #include "console.h"
 #include "printf.h"
+#include "riscv.h"
 
 static char digits[] = "0123456789abcdef";
 static void print_number(long num, int base, int sign) {
@@ -31,8 +32,11 @@ static void print_number(long num, int base, int sign) {
     }
 }
 int puts(const char *s) {
+  int state = intr_get();
+  intr_off();
   console_puts(s);
   console_putc('\n');
+  intr_on(state);
   return 0;
 }
 int printf(const char *fmt, ...) {
@@ -50,9 +54,14 @@ int printf(const char *fmt, ...) {
     }
 
     if (!has_percent) {
+        int state = intr_get();
+        intr_off();
         console_puts((char*)fmt); // 直接输出纯字符串
+        intr_on(state);
         return 0;
     }
+    int state = intr_get();
+    intr_off();
     va_start(ap, fmt);
     for (i = 0; (c = fmt[i] & 0xff) != 0; i++) {
         if (c != '%') {
@@ -92,6 +101,7 @@ int printf(const char *fmt, ...) {
         }
     }
     va_end(ap);
+    intr_on(state);
     return 0;
 }
 

@@ -20,6 +20,11 @@ uint64 get_time(void)
 {
   return r_time();
 }
+// Return number of timer interrupts since boot
+uint64 timer_ticks(void)
+{
+  return g_ticks;
+}
 
 void timer_interrupt(void)
 {

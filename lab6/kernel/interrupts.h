@@ -32,5 +32,7 @@ void handle_instruction_page_fault(uint64 sepc, uint64 stval);
 void handle_load_page_fault(uint64 sepc, uint64 stval);
 void handle_store_page_fault(uint64 sepc, uint64 stval);
 void handle_illegal_instruction(uint64 sepc, uint64 stval);
+// Trap handler entry (from trap.S), receives saved-context stack pointer
+void trap_handler(uint64 scause, uint64 sepc, uint64 stval, void *ctx_sp, uint64 a7val, uint64 a0val);
 
 #endif
