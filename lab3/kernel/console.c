@@ -104,19 +104,10 @@ int printf_color(int color, const char *fmt, ...) {
     va_list ap;
     char buf[16];
 
-    console_puts("[DEBUG: Color value = ");
-    print_number(color, 10, 0);
-    console_puts("]\n");
-
     // 设置前景色: \033[3xm, x 是颜色代码 (30-37)
     if (color >= COLOR_BLACK && color <= COLOR_WHITE) {
         sprintf(buf, "\033[%dm", color + 30);
-        console_puts("[DEBUG: Sending color sequence: ");
         console_puts(buf);
-        console_puts("]\n");
-        console_puts(buf);
-    }else {
-        console_puts("[DEBUG: Invalid color]\n");
     }
 
     // 格式化输出
